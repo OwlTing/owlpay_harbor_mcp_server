@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/owlting-owlpay-harbor-mcp-server-badge.png)](https://mseep.ai/app/owlting-owlpay-harbor-mcp-server)
+
 # OwlPay Harbor MCP Server
 
 ## Overview
