@@ -1,10 +1,15 @@
+# owlpay_harbor_web_server.py
 import asyncio
-from typing import Any
+import contextlib
+from typing import Any, Annotated
 
 import requests
 from requests.adapters import HTTPAdapter
 from pydantic import BaseModel, Field
 
+from starlette.applications import Starlette
+from starlette.routing import Mount
+from mcp.server.fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -20,22 +25,21 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-OWLPAY_HARBOR_MCP_SERVER_API = (
+OWLPAY_HARBOR_API = (
     "https://mcp.owlting.com/owlpay-harbor/get-owlpay-harbor-documentation"
 )
-
 
 class SearchArgs(BaseModel):
     """Parameters for searching Owlpay Harbor documentation."""
     query: str = Field(..., description="Search keywords in English. Any non-English input will be auto-translated to English before populating this field.")
 
-def search_owlpay_harbor_documentation(query: str) -> str:
+def search_owlpay_harbor_documentation_func(query: str) -> str:
     """Call external Owlpay Harbor API and return raw text or raise McpError."""
     try:
         session = requests.Session()
         session.mount("http://", HTTPAdapter(max_retries=3))
         resp = session.get(
-            OWLPAY_HARBOR_MCP_SERVER_API, params={"query": query}, timeout=30
+            OWLPAY_HARBOR_API, params={"query": query}, timeout=30
         )
         resp.raise_for_status()
         return resp.text
@@ -47,8 +51,18 @@ def search_owlpay_harbor_documentation(query: str) -> str:
             )
         )
 
+# =================== FastMCP for web server ===================
+mcp = FastMCP("OwlPay Harbor Search", stateless_http=True)
 
-async def serve() -> None:
+@mcp.tool(description='Search Owlpay Harbor documentation. Any non-English input will be auto-translated to English before populating the query.')
+def search_owlpay_harbor_documentation(
+    query: Annotated[str, Field(description="Search keywords in English. Any non-English input will be auto-translated to English before populating this field.")]
+) -> str:
+    """Search Owlpay Harbor documentation with direct query parameter."""
+    return search_owlpay_harbor_documentation_func(query)
+
+# =================== stdio_server for MCP mode ===================
+async def serve_mcp() -> None:
     """Run the search-owlpay-harbor-documentation MCP server."""
     server = Server("search-owlpay-harbor-documentation")
 
@@ -71,7 +85,7 @@ async def serve() -> None:
                 arguments=[
                     PromptArgument(
                         name="query",
-                        description="Search query in English. Any non-English input will be auto-translated to English before filling this argument.",
+                        description="Search keywords in English. Any non-English input will be auto-translated to English before populating this field.",
                         required=True,
                     )
                 ],
@@ -87,7 +101,7 @@ async def serve() -> None:
         except ValueError as e:
             raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e)))
 
-        result = search_owlpay_harbor_documentation(args.query)
+        result = search_owlpay_harbor_documentation_func(args.query)
         return [TextContent(type="text", text=result)]
 
     @server.get_prompt()
@@ -97,7 +111,7 @@ async def serve() -> None:
         if not arguments or "query" not in arguments:
             raise McpError(ErrorData(code=INVALID_PARAMS, message="Query is required"))
         try:
-            result = search_owlpay_harbor_documentation(arguments["query"])
+            result = search_owlpay_harbor_documentation_func(arguments["query"])
         except McpError as e:
             return GetPromptResult(
                 description="Search failed",
@@ -111,3 +125,45 @@ async def serve() -> None:
     options = server.create_initialization_options()
     async with stdio_server() as (r, w):
         await server.run(r, w, options, raise_exceptions=True)
+
+# ---------- lifespan: 啟動 / 關閉 session_manager ---------------------------
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    async with mcp.session_manager.run():   # ★ 必須啟動
+        yield                               #   結束時自動關閉
+
+# ---------- Starlette app：掛載在 /mcp --------------------------------------
+app = Starlette(lifespan=lifespan, routes=[
+    Mount("/", app=mcp.streamable_http_app()),
+])
+
+def main():
+    """Run the Owlpay Harbor MCP web server."""
+    import argparse
+    import uvicorn
+
+    parser = argparse.ArgumentParser(
+        description="Run Owlpay Harbor MCP web server"
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=5000, help="Port to bind to")
+    parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
+    parser.add_argument("--mode", choices=["mcp", "uvicorn"], default="mcp", 
+                        help="Run mode: 'mcp' for MCP stdio (default), 'uvicorn' for uvicorn web server")
+    
+    args = parser.parse_args()
+    
+    if args.mode == "mcp":
+        # MCP stdio 模式
+        asyncio.run(serve_mcp())
+    else:
+        # uvicorn web server 模式
+        uvicorn.run(
+            "owlpay_harbor_mcp_server.server:app",
+            host=args.host,
+            port=args.port,
+            reload=args.reload
+        )
+
+if __name__ == "__main__":
+    main()
